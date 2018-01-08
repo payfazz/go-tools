@@ -8,8 +8,8 @@ import (
 )
 
 func main() {
-	gopath, err := runCmd("", "go", "env", "GOPATH")
-	if err != nil || gopath == "" {
+	gopath, _ := runCmd("", "go", "env", "GOPATH")
+	if gopath == "" {
 		fmt.Fprintln(os.Stderr, "\"go env GOPATH\" return nothing, propably misconfiguration of GOPATH")
 		fmt.Fprintln(os.Stderr, "see: https://github.com/golang/go/wiki/GOPATH")
 		os.Exit(1)
@@ -78,7 +78,7 @@ func gpInit(gopath, importpath string) {
 		}
 	}
 
-	projectPath = strings.Replace(projectPath, string(filepath.Separator), "/", -1)
+	projectPath = strings.Replace(projectPath, "/", string(filepath.Separator), -1)
 	targetDir := filepath.Join(gopath, "src", projectPath)
 	_, err = os.Stat(targetDir)
 	if err != nil && !os.IsNotExist(err) {
