@@ -121,13 +121,13 @@ func gpInit(force bool, importPath string) {
 			}
 		}
 	}
-	if !os.IsNotExist(err) {
+	if err != nil && !os.IsNotExist(err) {
 		panic(err)
 	}
 
 	os.Chdir(gopath)
 	os.MkdirAll(filepath.Dir(targetDir), 0755)
-	if err = os.Rename(projectDir, targetDir); err != nil {
+	if err = utilMove(projectDir, targetDir); err != nil {
 		panic(err)
 	}
 	if err = os.Symlink(targetDir, projectDir); err != nil {
@@ -155,7 +155,7 @@ func gpDeinit() {
 	if err = os.Remove(linkToInside); err != nil {
 		panic(err)
 	}
-	if err = os.Rename(targetDir, linkToInside); err != nil {
+	if err = utilMove(targetDir, linkToInside); err != nil {
 		panic(err)
 	}
 
