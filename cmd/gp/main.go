@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,11 +46,20 @@ func main() {
 
 	switch os.Args[1] {
 	case "init":
-		importpath := ""
+		var force bool
+		var importPath string
 		if len(os.Args) > 2 {
-			importpath = os.Args[2]
+			fs := flag.NewFlagSet("", flag.ContinueOnError)
+			fs.SetOutput(ioutil.Discard)
+			fs.BoolVar(&force, "f", false, "")
+			if err := fs.Parse(os.Args[2:]); err != nil {
+				showUsage()
+			}
+			if fs.NArg() > 0 {
+				importPath = fs.Arg(0)
+			}
 		}
-		gpInit(importpath)
+		gpInit(force, importPath)
 	case "deinit":
 		gpDeinit()
 	case "fix":
@@ -68,16 +79,17 @@ func showUsage() {
 	fmt.Fprintln(os.Stderr, "see: https://golang.org/cmd/go/#hdr-Import_path_checking")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "USAGE:")
-	fmt.Fprintln(os.Stderr, "  gp init [ImportPath]    move the project to GOPATH and replace it with symlink")
-	fmt.Fprintln(os.Stderr, "                          if ImportPath is not specified, it will")
-	fmt.Fprintln(os.Stderr, "                          run \"go list -f '{{.ImportComment}}'\"")
-	fmt.Fprintln(os.Stderr, "  gp deinit               move out project from GOPATH")
-	fmt.Fprintln(os.Stderr, "  gp fix <OldPath>        replace OldPath with project ImportPath recursively")
-	fmt.Fprintln(os.Stderr, "  gp status               show status")
+	fmt.Fprintln(os.Stderr, "  gp init [-f] [ImportPath]    move the project to GOPATH and replace it with symlink")
+	fmt.Fprintln(os.Stderr, "                               if ImportPath is not specified, it will")
+	fmt.Fprintln(os.Stderr, "                               run \"go list -f '{{.ImportComment}}'\"")
+	fmt.Fprintln(os.Stderr, "                               \"-f\" will remove what already inside GOPATH")
+	fmt.Fprintln(os.Stderr, "  gp deinit                    move out project from GOPATH")
+	fmt.Fprintln(os.Stderr, "  gp fix <OldPath>             replace OldPath with project ImportPath recursively")
+	fmt.Fprintln(os.Stderr, "  gp status                    show status")
 	os.Exit(1)
 }
 
-func gpInit(importPath string) {
+func gpInit(force bool, importPath string) {
 	var projectPath string
 	var projectDir string
 
@@ -100,8 +112,14 @@ func gpInit(importPath string) {
 	targetDir := filepath.Join(gopath, "src", projectPath)
 	_, err := os.Stat(targetDir)
 	if err == nil {
-		fmt.Fprintln(os.Stderr, targetDir+" is already exists")
-		os.Exit(1)
+		if !force {
+			fmt.Fprintln(os.Stderr, targetDir+" is already exists")
+			os.Exit(1)
+		} else {
+			if err = os.RemoveAll(targetDir); err != nil {
+				panic(err)
+			}
+		}
 	}
 	if !os.IsNotExist(err) {
 		panic(err)
