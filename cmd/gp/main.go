@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"go/parser"
@@ -9,6 +10,7 @@ import (
 	"go/token"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,15 +25,23 @@ var (
 func main() {
 	var err error
 
-	if len(os.Args) == 1 {
-		showUsage()
-	}
-
-	gopath, _ = runCmd("", "go", "env", "GOPATH")
+	gopath, err = runCmd("", "go", "env", "GOPATH")
 	if gopath == "" {
 		fmt.Fprintln(os.Stderr, "\"go env GOPATH\" return nothing, propably misconfiguration of GOPATH")
 		fmt.Fprintln(os.Stderr, "see: https://github.com/golang/go/wiki/GOPATH")
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				fmt.Fprintln(os.Stderr)
+				fmt.Fprint(os.Stderr, "Subcommand error: ")
+				fmt.Fprintln(os.Stderr, exitErr.Error())
+				os.Stderr.Write(exitErr.Stderr)
+			}
+		}
 		os.Exit(1)
+	}
+
+	if len(os.Args) == 1 {
+		showUsage()
 	}
 
 	curdir, err = getWd()
@@ -46,8 +56,10 @@ func main() {
 
 	switch os.Args[1] {
 	case "init":
-		var force bool
-		var importPath string
+		var (
+			force      bool
+			targetPath string
+		)
 		if len(os.Args) > 2 {
 			fs := flag.NewFlagSet("", flag.ContinueOnError)
 			fs.SetOutput(ioutil.Discard)
@@ -56,17 +68,19 @@ func main() {
 				showUsage()
 			}
 			if fs.NArg() > 0 {
-				importPath = fs.Arg(0)
+				targetPath = fs.Arg(0)
 			}
 		}
-		gpInit(force, importPath)
+		gpInit(force, targetPath)
 	case "deinit":
 		gpDeinit()
 	case "fix":
-		if len(os.Args) <= 2 {
+		if len(os.Args) < 3 {
 			showUsage()
 		}
 		gpFix(os.Args[2])
+	case "list-ext":
+		gpListExt()
 	case "status":
 		gpStatus()
 	default:
@@ -79,50 +93,62 @@ func showUsage() {
 	fmt.Fprintln(os.Stderr, "see: https://golang.org/cmd/go/#hdr-Import_path_checking")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "USAGE:")
-	fmt.Fprintln(os.Stderr, "  gp init [-f] [ImportPath]    move the project to GOPATH and replace it with symlink")
-	fmt.Fprintln(os.Stderr, "                               if ImportPath is not specified, it will")
+	fmt.Fprintln(os.Stderr, "  gp init [-f] [TargetPath]    move the project to GOPATH and replace it with symlink")
+	fmt.Fprintln(os.Stderr, "                               if TargetPath is not specified, it will")
 	fmt.Fprintln(os.Stderr, "                               run \"go list -f '{{.ImportComment}}'\"")
 	fmt.Fprintln(os.Stderr, "                               \"-f\" will remove what already inside GOPATH")
 	fmt.Fprintln(os.Stderr, "  gp deinit                    move out project from GOPATH")
-	fmt.Fprintln(os.Stderr, "  gp fix <OldPath>             replace OldPath with project ImportPath recursively")
+	fmt.Fprintln(os.Stderr, "  gp fix <BrokenPath>          rewrite go source code recursively, replace BrokenPath")
+	fmt.Fprintln(os.Stderr, "                               with project ImportPath")
+	fmt.Fprintln(os.Stderr, "  gp list-ext                  list external dependencies")
 	fmt.Fprintln(os.Stderr, "  gp status                    show status")
 	os.Exit(1)
 }
 
-func gpInit(force bool, importPath string) {
-	var projectPath string
+func gpInit(force bool, targetPath string) {
+	var err error
 	var projectDir string
 
 	if linkToInside != "" {
 		os.Exit(0)
 	}
 
-	if importPath == "" {
-		projectDir, importPath = getProject(curdir)
+	if targetPath == "" {
+		projectDir, targetPath, err = getProject(curdir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
 	} else {
 		projectDir = curdir
 	}
 
-	if importPath == "" {
+	if targetPath == "" {
 		fmt.Fprintln(os.Stderr, "project ImportPath is undefined")
 		os.Exit(1)
 	}
 
-	projectPath = strings.Replace(importPath, "/", string(filepath.Separator), -1)
-	targetDir := filepath.Join(gopath, "src", projectPath)
-	_, err := os.Stat(targetDir)
+	targetDir := strings.Replace(targetPath, "/", string(filepath.Separator), -1)
+	targetDir = filepath.Join(gopath, "src", targetDir)
+	_, err = os.Stat(targetDir)
 	if err == nil {
 		if !force {
 			fmt.Fprintln(os.Stderr, targetDir+" is already exists")
 			os.Exit(1)
-		} else {
-			if err = os.RemoveAll(targetDir); err != nil {
-				panic(err)
-			}
+		} else if err := os.RemoveAll(targetDir); err != nil {
+			panic(err)
 		}
-	}
-	if err != nil && !os.IsNotExist(err) {
+	} else if !os.IsNotExist(err) {
 		panic(err)
+	}
+
+	stat, err := os.Lstat(projectDir)
+	if err != nil {
+		panic(err)
+	}
+	if stat.Mode()&os.ModeSymlink != 0 {
+		fmt.Fprintln(os.Stderr, projectDir+" is a symlink")
+		os.Exit(1)
 	}
 
 	os.Chdir(gopath)
@@ -177,27 +203,30 @@ func gpStatus() {
 		panic(err)
 	}
 
-	fmt.Println("active: " + importPathFromDir(target))
+	fmt.Println("active: " + importPathFromDir(target) + " -> " + target)
 	os.Exit(0)
 }
 
-func gpFix(oldPath string) {
+func gpFix(brokenPath string) {
 	if linkToInside == "" {
 		fmt.Fprintln(os.Stderr, "not in GOPATH and project is not initialized, run \"gp init\" first")
 		os.Exit(1)
 	}
-	target, err := followLink(linkToInside)
+	targetDir, err := followLink(linkToInside)
 	if err != nil {
 		panic(err)
 	}
 
-	importPath := importPathFromDir(target)
+	importPath := importPathFromDir(targetDir)
 
-	var printConfig = printer.Config{Mode: printer.UseSpaces | printer.TabIndent, Tabwidth: 8}
+	printConfig := printer.Config{
+		Mode:     printer.UseSpaces | printer.TabIndent,
+		Tabwidth: 8,
+	}
 
-	filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(targetDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if info.IsDir() && info.Name() == "vendor" {
 			return filepath.SkipDir
@@ -218,10 +247,15 @@ func gpFix(oldPath string) {
 			if err != nil {
 				panic(err)
 			}
-			if strings.HasPrefix(i, oldPath) {
+			if i == brokenPath {
 				changed = true
-				i = importPath + strings.TrimPrefix(i, oldPath)
-				ispec.Path.Value = strconv.Quote(i)
+				ispec.Path.Value = strconv.Quote(brokenPath)
+			} else if strings.HasPrefix(i, brokenPath) {
+				tmp := strings.TrimPrefix(i, brokenPath)
+				if strings.HasPrefix(tmp, "/") {
+					changed = true
+					ispec.Path.Value = strconv.Quote(importPath + tmp)
+				}
 			}
 		}
 		if changed {
@@ -243,13 +277,87 @@ func gpFix(oldPath string) {
 
 		return nil
 	})
+	if err != nil {
+		panic(err)
+	}
 	os.Exit(0)
 }
 
-func getProject(dir string) (string, string) {
+func gpListExt() {
+	if linkToInside == "" {
+		fmt.Fprintln(os.Stderr, "not in GOPATH and project is not initialized, run \"gp init\" first")
+		os.Exit(1)
+	}
+	targetDir, err := followLink(linkToInside)
+	if err != nil {
+		panic(err)
+	}
+
+	internal := map[string]bool{}
+	external := map[string]bool{}
+
+	cmd := exec.Command("go", "list", "./...")
+	cmd.Dir = targetDir
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			fmt.Fprint(os.Stderr, "Subcommand error: ")
+			fmt.Fprintln(os.Stderr, exitErr.Error())
+			os.Stderr.Write(exitErr.Stderr)
+		}
+		panic(err)
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		text := scanner.Text()
+		text2 := sanitizeImportPath(text)
+		if text == text2 {
+			internal[text] = true
+		}
+	}
+	if scanner.Err() != nil {
+		panic(err)
+	}
+
+	cmd = exec.Command("go", "list", "-f", `{{range .Deps}}{{.|printf "%s\n"}}{{end}}`, "./...")
+	cmd.Dir = targetDir
+	out, err = cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			fmt.Fprint(os.Stderr, "Subcommand error: ")
+			fmt.Fprintln(os.Stderr, exitErr.Error())
+			os.Stderr.Write(exitErr.Stderr)
+		}
+		panic(err)
+	}
+	scanner = bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		text := scanner.Text()
+		text2 := sanitizeImportPath(text)
+		if text == text2 && !internal[text] {
+			external[text] = true
+		}
+	}
+	if scanner.Err() != nil {
+		panic(err)
+	}
+
+	for k, v := range external {
+		if v {
+			fmt.Println(k)
+		}
+	}
+
+	os.Exit(0)
+}
+
+func getProject(dir string) (string, string, error) {
 	projectDir := dir
 	projectPath, _ := runCmd(projectDir, "go", "list", "-f", "{{.ImportComment}}")
-	return projectDir, projectPath
+	if strings.Contains("/"+projectPath, "/vendor/") {
+		return "", "", fmt.Errorf("ImportPath cannot contains \"vendor\"")
+	}
+	return projectDir, projectPath, nil
 }
 
 func importPathFromDir(target string) string {
@@ -258,13 +366,20 @@ func importPathFromDir(target string) string {
 	}
 	target = strings.TrimPrefix(target, filepath.Join(gopath, "src"))
 	target = strings.Replace(target, string(filepath.Separator), "/", -1)
-	target = strings.TrimPrefix(target, "/")
+	return sanitizeImportPath(target)
+}
+
+func sanitizeImportPath(target string) string {
+	if !strings.HasPrefix(target, "/") {
+		target = "/" + target
+	}
 	for {
-		idx := strings.Index(target, "vendor/")
+		idx := strings.Index(target, "/vendor/")
 		if idx == -1 {
 			break
 		}
-		target = target[idx+7:]
+		target = target[idx+8:]
 	}
+	target = strings.TrimPrefix(target, "/")
 	return target
 }
