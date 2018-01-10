@@ -203,7 +203,8 @@ func gpStatus() {
 		panic(err)
 	}
 
-	fmt.Println("active: " + importPathFromDir(target) + " -> " + target)
+	fmt.Println("project: " + importPathFromDir(target))
+	fmt.Println("symlink: " + linkToInside + " -> " + target)
 	os.Exit(0)
 }
 
